@@ -1,0 +1,233 @@
+# Simulation Configuration - Environmental Model Parameters
+# This file contains physical parameters for the greenhouse simulation engine
+
+# Temperature dynamics model
+temperature:
+  # Heat dissipation time constant (seconds)
+  # Larger values = slower temperature changes
+  # Physical meaning: time for 63.2% of temperature difference to dissipate
+  time_constant: 600.0
+
+  # Heater power (degrees C per second at full power)
+  heater_power: 0.05
+
+  # Fan cooling efficiency (degrees C per second at full speed)
+  fan_efficiency: 0.03
+
+  # Solar radiation effect (time-of-day dependent)
+  solar_enabled: true
+  solar_peak_hour: 14  # 2 PM local time
+  solar_max_power: 0.02  # Max degrees C per second
+  solar_duration: 6  # Hours of significant solar heating (centered on peak)
+
+  # Thermal mass effect (smooths temperature changes)
+  thermal_mass: 1.0  # Multiplier: >1 = more inertia, <1 = responds faster
+
+  # Minimum temperature gradient for natural convection (degrees C)
+  convection_threshold: 2.0
+
+# Soil moisture dynamics model
+moisture:
+  # Evaporation rate constant (% per second)
+  # Depends on temperature, humidity, and airflow
+  evaporation_base_rate: 0.001
+
+  # Temperature effect on evaporation (multiplier per degree C above 20)
+  evaporation_temp_coefficient: 0.05
+
+  # Airflow effect on evaporation (multiplier per unit airflow)
+  evaporation_airflow_coefficient: 0.02
+
+  # Pump water delivery rate (% per second when ON)
+  pump_rate: 0.5
+
+  # Soil drainage rate constant (% per second, depends on moisture level)
+  drainage_rate: 0.0005
+
+  # Drainage threshold (drainage only occurs above this % moisture)
+  drainage_threshold: 80.0
+
+  # Moisture capacity (max % that soil can hold)
+  max_capacity: 100.0
+
+  # Minimum moisture level (% - below this, plant stress occurs)
+  min_level: 10.0
+
+  # Water absorption time constant (seconds for water to penetrate soil)
+  absorption_time_constant: 60.0
+
+# Humidity model
+humidity:
+  # Initial humidity (%)
+  initial: 60.0
+
+  # Evaporation contribution (humidity increase per % moisture lost)
+  evaporation_to_humidity: 0.1
+
+  # Ventilation dehumidification rate (% per second at full fan speed)
+  ventilation_rate: 0.02
+
+  # Ambient humidity exchange rate (% per second)
+  ambient_exchange_rate: 0.001
+
+  # Ambient humidity (%)
+  ambient_humidity: 50.0
+
+  # Condensation threshold (humidity % at which condensation occurs)
+  condensation_threshold: 95.0
+
+# Airflow model
+airflow:
+  # Fan speed to airflow conversion
+  # Airflow units are arbitrary but consistent
+  fan_min_airflow: 0.0  # Airflow when fan is off
+  fan_max_airflow: 10.0  # Airflow at full fan speed
+
+  # Natural ventilation (airflow when fan is off, due to vents)
+  natural_ventilation_base: 0.5
+
+  # Temperature-driven natural ventilation (chimney effect)
+  natural_ventilation_temp_coefficient: 0.1  # Per degree C difference
+
+  # Vent position effect on natural ventilation (multiplier)
+  vent_effect_multiplier: 2.0
+
+  # Airflow time constant (seconds to reach steady-state)
+  airflow_time_constant: 30.0
+
+# Light cycle model (affects temperature and plant processes)
+light:
+  # Enable day/night simulation
+  enabled: true
+
+  # Sunrise hour (local time, 24-hour format)
+  sunrise: 6
+
+  # Sunset hour (local time)
+  sunset: 20
+
+  # Light intensity effect on temperature (degrees C added during day)
+  daytime_temp_boost: 2.0
+
+  # Twilight duration (hours of gradual change at sunrise/sunset)
+  twilight_duration: 1.0
+
+# Equipment characteristics and limitations
+equipment:
+  fan:
+    # Fan inertia (time constant for speed changes, seconds)
+    inertia: 5.0
+
+    # Power consumption at full speed (Watts)
+    power_consumption: 12.0
+
+    # Noise level (dB at full speed)
+    noise_level: 45.0
+
+    # Efficiency degradation over time (per hour of operation)
+    degradation_rate: 0.0001
+
+  heater:
+    # Heater warm-up time (seconds to reach full power)
+    warmup_time: 30.0
+
+    # Cool-down time (seconds to fully cool)
+    cooldown_time: 120.0
+
+    # Power consumption (Watts)
+    power_consumption: 50.0
+
+    # Energy efficiency (fraction of power converted to heat)
+    efficiency: 0.85
+
+  pump:
+    # Flow rate (mL per second)
+    flow_rate: 100.0
+
+    # Reservoir capacity (mL)
+    reservoir_capacity: 5000.0
+
+    # Current reservoir level (mL)
+    reservoir_level: 5000.0
+
+    # Low water warning threshold (mL)
+    low_water_threshold: 1000.0
+
+    # Prime time (seconds to start pumping after activation)
+    prime_time: 2.0
+
+  servo:
+    # Servo movement speed (degrees per second)
+    movement_speed: 60.0
+
+    # Position accuracy (degrees)
+    position_accuracy: 2.0
+
+# Failure modes (for testing and demonstration)
+failure_modes:
+  # Enable failure mode simulation
+  enabled: false
+
+  # Mean time between failures (hours, 0 = disabled)
+  mtbf: 0
+
+  # Specific failure scenarios
+  scenarios:
+    sensor_failure:
+      enabled: false
+      type: "stuck"  # stuck, noisy, drift, dropout
+      affected_sensor: "temperature"  # temperature, moisture, airflow
+      duration: 60  # seconds
+
+    actuator_failure:
+      enabled: false
+      type: "stuck_on"  # stuck_on, stuck_off, degraded, intermittent
+      affected_actuator: "fan"  # fan, heater, pump, vent
+      duration: 120  # seconds
+
+    environmental_stress:
+      enabled: false
+      type: "heatwave"  # heatwave, coldsnap, humidity_spike
+      severity: 1.5  # Multiplier for ambient conditions
+      duration: 300  # seconds
+
+    power_failure:
+      enabled: false
+      duration: 30  # seconds
+
+    reservoir_empty:
+      enabled: false
+      # Simulates running out of water
+
+# Noise and uncertainty (realistic sensor/environment variations)
+noise:
+  # Enable noise simulation
+  enabled: true
+
+  # Sensor noise (standard deviation)
+  temperature_noise: 0.1  # degrees C
+  moisture_noise: 1.0  # %
+  airflow_noise: 0.2  # arbitrary units
+
+  # Environmental variability
+  ambient_temp_variation: 0.5  # degrees C standard deviation
+  ambient_temp_drift_rate: 0.001  # degrees C per second (slow trends)
+
+# Advanced physics (optional, for more realistic simulation)
+advanced:
+  # Enable advanced models (more CPU intensive)
+  enabled: false
+
+  # Spatial temperature gradients (vertical stratification)
+  temperature_stratification: false
+  stratification_coefficient: 0.5  # degrees C per meter height
+
+  # Moisture distribution (non-uniform soil moisture)
+  moisture_distribution: false
+
+  # Thermal radiation modeling (IR heat loss through walls)
+  thermal_radiation: false
+  wall_emissivity: 0.9
+
+  # CO2 level modeling (affects plant growth, not implemented yet)
+  co2_modeling: false
