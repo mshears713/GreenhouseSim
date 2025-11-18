@@ -27,6 +27,11 @@ from ..data.models import (
     ControlParameters
 )
 
+from .temperature_model import TemperatureModel
+from .moisture_model import MoistureModel
+from .airflow_model import AirflowModel
+from .failure_modes import FailureModeSimulator
+
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +118,13 @@ class SimulationEngine:
         self.updates_per_second = 0.0
         self.last_update_time = time.time()
 
-        logger.info("SimulationEngine initialized")
+        # Initialize detailed physics models
+        self.temperature_model = TemperatureModel(self.config)
+        self.moisture_model = MoistureModel(self.config)
+        self.airflow_model = AirflowModel(self.config)
+        self.failure_simulator = FailureModeSimulator(self.config)
+
+        logger.info("SimulationEngine initialized with detailed physics models")
 
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load simulation configuration from YAML file"""
@@ -216,23 +227,80 @@ class SimulationEngine:
         Educational Note:
         This is where the physics happens! Each update:
         1. Reads current actuator states
-        2. Calculates environmental changes
-        3. Updates state variables
+        2. Applies failure modes (if enabled)
+        3. Calculates environmental changes using detailed models
+        4. Updates state variables
         """
-        # Update temperature
-        self._update_temperature(dt)
+        # Update failure simulator
+        self.failure_simulator.update(self.sim_time)
 
-        # Update moisture
-        self._update_moisture(dt)
+        # Get actuator states (with potential failures applied)
+        fan = self.actuators[ActuatorType.FAN]
+        heater = self.actuators[ActuatorType.HEATER]
+        pump = self.actuators[ActuatorType.PUMP]
+        vent = self.actuators[ActuatorType.VENT]
 
-        # Update humidity
+        # Apply actuator failures
+        fan_state, fan_value = self.failure_simulator.check_actuator_failure(
+            'fan', fan.enabled, fan.value
+        )
+        heater_state, heater_value = self.failure_simulator.check_actuator_failure(
+            'heater', heater.enabled, heater.value
+        )
+        pump_state, pump_value = self.failure_simulator.check_actuator_failure(
+            'pump', pump.enabled, pump.value
+        )
+
+        # Check for reservoir empty (pump can't work)
+        if self.failure_simulator.is_reservoir_empty():
+            pump_state = False
+
+        # Check for power loss (all actuators fail)
+        if self.failure_simulator.is_power_lost():
+            fan_state = heater_state = pump_state = False
+            fan_value = heater_value = pump_value = 0.0
+
+        # Update airflow model first (needed by other models)
+        airflow = self.airflow_model.update(
+            dt=dt,
+            fan_speed_percent=fan_value if fan_state else 0.0,
+            vent_position_percent=vent.value,
+            temperature=self.environment.temperature,
+            ambient_temperature=self.environment.ambient_temperature
+        )
+        self.environment.airflow = self.failure_simulator.apply_sensor_failure('airflow', airflow)
+
+        # Update temperature model
+        temp = self.temperature_model.update(
+            dt=dt,
+            heater_on=heater_state,
+            heater_power_percent=heater_value,
+            fan_speed_percent=fan_value if fan_state else 0.0,
+            current_time_seconds=self.sim_time
+        )
+        self.environment.temperature = self.failure_simulator.apply_sensor_failure('temperature', temp)
+
+        # Update moisture model
+        moisture = self.moisture_model.update(
+            dt=dt,
+            pump_on=pump_state,
+            temperature=self.temperature_model.get_temperature(),  # Use actual temp for evaporation
+            humidity=self.environment.humidity,
+            airflow=self.airflow_model.get_airflow()
+        )
+        self.environment.moisture = self.failure_simulator.apply_sensor_failure('moisture', moisture)
+
+        # Update humidity (simplified - affected by evaporation and ventilation)
         self._update_humidity(dt)
-
-        # Update airflow
-        self._update_airflow(dt)
 
         # Update light level (time-of-day dependent)
         self._update_light(dt)
+
+        # Apply environmental stress to ambient temperature
+        base_ambient = self.config.get('temperature', {}).get('ambient_temperature', 20.0)
+        stressed_ambient = self.failure_simulator.get_environmental_stress(base_ambient)
+        self.environment.ambient_temperature = stressed_ambient
+        self.temperature_model.set_ambient_temperature(stressed_ambient)
 
         # Update timestamp
         self.environment.timestamp = datetime.now()
@@ -407,6 +475,22 @@ class SimulationEngine:
     def get_actuators(self) -> Dict[ActuatorType, ActuatorState]:
         """Get current actuator states"""
         return self.actuators
+
+    def get_failure_simulator(self) -> FailureModeSimulator:
+        """Get failure mode simulator for injecting failures"""
+        return self.failure_simulator
+
+    def get_temperature_model(self) -> TemperatureModel:
+        """Get temperature model for detailed analysis"""
+        return self.temperature_model
+
+    def get_moisture_model(self) -> MoistureModel:
+        """Get moisture model for detailed analysis"""
+        return self.moisture_model
+
+    def get_airflow_model(self) -> AirflowModel:
+        """Get airflow model for detailed analysis"""
+        return self.airflow_model
 
     def get_statistics(self) -> Dict[str, Any]:
         """Get simulation statistics"""
