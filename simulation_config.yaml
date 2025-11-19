@@ -1,6 +1,30 @@
 # Simulation Configuration - Environmental Model Parameters
 # This file contains physical parameters for the greenhouse simulation engine
 
+# ============================================================================
+# SIMULATION ENGINE PERFORMANCE
+# ============================================================================
+
+simulation:
+  # Time step for numerical integration (seconds)
+  # Smaller = more accurate but slower; Larger = faster but less accurate
+  time_step: 0.1  # 10 Hz default
+
+  # Target update rate (Hz) - how fast the simulation tries to run
+  target_update_rate: 10.0  # 10 updates per second
+
+  # Adaptive timing: automatically adjust time step based on real-time performance
+  # If true, simulation will slow down gracefully if system can't keep up
+  # If false, uses fixed time_step regardless of performance
+  adaptive_timing: true
+
+  # Maximum time step to prevent numerical instability when behind schedule
+  max_time_step: 0.2  # Don't simulate more than 200ms per step
+
+# ============================================================================
+# ENVIRONMENTAL MODELS
+# ============================================================================
+
 # Temperature dynamics model
 temperature:
   # Heat dissipation time constant (seconds)
