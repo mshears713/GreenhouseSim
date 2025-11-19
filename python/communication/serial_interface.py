@@ -93,7 +93,9 @@ class ArduinoInterface:
         baud_rate: int = 9600,
         timeout: float = 2.0,
         reconnect_attempts: int = 5,
-        reconnect_delay: float = 2.0
+        reconnect_delay: float = 2.0,
+        use_checksums: bool = True,
+        max_reconnect_delay: float = 30.0
     ):
         """
         Initialize Arduino interface
@@ -103,13 +105,17 @@ class ArduinoInterface:
             baud_rate: Communication speed (must match Arduino)
             timeout: Read timeout in seconds
             reconnect_attempts: Number of reconnection attempts
-            reconnect_delay: Delay between reconnection attempts
+            reconnect_delay: Initial delay between reconnection attempts
+            use_checksums: Enable XOR checksum validation
+            max_reconnect_delay: Maximum delay for exponential backoff
         """
         self.port = port
         self.baud_rate = baud_rate
         self.timeout = timeout
         self.reconnect_attempts = reconnect_attempts
         self.reconnect_delay = reconnect_delay
+        self.use_checksums = use_checksums
+        self.max_reconnect_delay = max_reconnect_delay
 
         # Serial connection
         self.serial: Optional[serial.Serial] = None
@@ -135,9 +141,17 @@ class ArduinoInterface:
         self.messages_sent = 0
         self.messages_received = 0
         self.errors_count = 0
+        self.checksum_errors = 0
         self.last_message_time: Optional[datetime] = None
+        self.connection_lost_count = 0
+        self.reconnect_success_count = 0
 
-        logger.info(f"ArduinoInterface initialized on {port} @ {baud_rate} baud")
+        # Health monitoring
+        self.health_check_interval = 10.0  # seconds
+        self.last_health_check: Optional[datetime] = None
+        self.connection_timeout = 30.0  # seconds without messages = unhealthy
+
+        logger.info(f"ArduinoInterface initialized on {port} @ {baud_rate} baud (checksums: {use_checksums})")
 
     def connect(self) -> bool:
         """
@@ -246,6 +260,7 @@ class ArduinoInterface:
         Parse a raw serial message into structured format
 
         Message format: PREFIX:data1,data2,data3,...
+        With checksums: PREFIX:data1,data2,data3,...*XX
 
         Args:
             line: Raw message string
@@ -254,6 +269,15 @@ class ArduinoInterface:
             Parsed SerialMessage or None if parsing failed
         """
         try:
+            # Validate checksum if enabled
+            if self.use_checksums:
+                is_valid, line_without_checksum = self.validate_checksum(line)
+                if not is_valid:
+                    self.checksum_errors += 1
+                    logger.error(f"Checksum validation failed for message: {line[:50]}...")
+                    return None
+                line = line_without_checksum
+
             # Split on first colon to get prefix and content
             parts = line.split(':', 1)
             if len(parts) < 2:
@@ -384,37 +408,68 @@ class ArduinoInterface:
 
     def _attempt_reconnect(self) -> bool:
         """
-        Attempt to reconnect to Arduino
+        Attempt to reconnect to Arduino with exponential backoff
 
         Returns:
             True if reconnection successful
+
+        Educational Note:
+        Exponential backoff prevents overwhelming the system with
+        rapid reconnection attempts. Delay doubles after each failure.
         """
+        self.connection_lost_count += 1
+        current_delay = self.reconnect_delay
+
         for attempt in range(self.reconnect_attempts):
             logger.info(f"Reconnection attempt {attempt + 1}/{self.reconnect_attempts}")
 
             try:
+                # Close existing connection if any
                 if self.serial:
                     try:
                         self.serial.close()
                     except:
                         pass
+                    time.sleep(0.5)  # Brief delay before reopening
 
+                # Try to reopen serial port
                 self.serial = serial.Serial(
                     port=self.port,
                     baudrate=self.baud_rate,
-                    timeout=self.timeout
+                    timeout=self.timeout,
+                    write_timeout=self.timeout
                 )
 
-                time.sleep(2.0)  # Wait for Arduino reset
+                # Wait for Arduino reset
+                time.sleep(2.0)
+
+                # Verify connection with a test read
+                self.serial.reset_input_buffer()
+                self.serial.reset_output_buffer()
+
                 self.connected = True
-                logger.info("Reconnection successful")
+                self.reconnect_success_count += 1
+                logger.info(f"Reconnection successful (attempt {attempt + 1})")
+
+                # Reset delay on successful reconnection
                 return True
 
-            except Exception as e:
-                logger.error(f"Reconnection attempt failed: {e}")
-                time.sleep(self.reconnect_delay)
+            except serial.SerialException as e:
+                logger.error(f"Reconnection attempt {attempt + 1} failed: {e}")
 
-        logger.error("All reconnection attempts failed")
+                # Exponential backoff
+                logger.info(f"Waiting {current_delay:.1f}s before retry...")
+                time.sleep(current_delay)
+
+                # Double delay for next attempt (capped at max)
+                current_delay = min(current_delay * 2, self.max_reconnect_delay)
+
+            except Exception as e:
+                logger.error(f"Unexpected error during reconnection: {e}")
+                time.sleep(current_delay)
+                current_delay = min(current_delay * 2, self.max_reconnect_delay)
+
+        logger.error(f"All {self.reconnect_attempts} reconnection attempts failed")
         self.connected = False
         return False
 
@@ -423,6 +478,7 @@ class ArduinoInterface:
         Send a command to Arduino
 
         Format: CMD:<command>,<param1>,<param2>,...
+        With checksums: CMD:<command>,<param1>,<param2>,...*XX
 
         Args:
             command: Command name (e.g., 'SET_MODE')
@@ -439,6 +495,11 @@ class ArduinoInterface:
         message = f"CMD:{command}"
         if params:
             message += ',' + ','.join(str(p) for p in params)
+
+        # Add checksum if enabled
+        if self.use_checksums:
+            message = self.append_checksum(message)
+
         message += '\n'
 
         try:
@@ -449,6 +510,8 @@ class ArduinoInterface:
         except serial.SerialException as e:
             logger.error(f"Error sending command: {e}")
             self.connected = False
+        except Exception as e:
+            logger.error(f"Unexpected error sending command: {e}")
 
     def send_raw(self, message: str):
         """
@@ -461,6 +524,10 @@ class ArduinoInterface:
             logger.error("Cannot send message: not connected")
             return
 
+        # Add checksum if enabled and not already present
+        if self.use_checksums and '*' not in message:
+            message = self.append_checksum(message)
+
         if not message.endswith('\n'):
             message += '\n'
 
@@ -472,6 +539,8 @@ class ArduinoInterface:
         except serial.SerialException as e:
             logger.error(f"Error sending message: {e}")
             self.connected = False
+        except Exception as e:
+            logger.error(f"Unexpected error sending message: {e}")
 
     def get_message(self, timeout: float = 0.1) -> Optional[SerialMessage]:
         """
@@ -500,9 +569,118 @@ class ArduinoInterface:
             'messages_sent': self.messages_sent,
             'messages_received': self.messages_received,
             'errors_count': self.errors_count,
+            'checksum_errors': self.checksum_errors,
+            'connection_lost_count': self.connection_lost_count,
+            'reconnect_success_count': self.reconnect_success_count,
             'last_message_time': self.last_message_time.isoformat() if self.last_message_time else None,
-            'queue_size': self.incoming_queue.qsize()
+            'queue_size': self.incoming_queue.qsize(),
+            'connection_healthy': self.is_connection_healthy()
         }
+
+    def is_connection_healthy(self) -> bool:
+        """
+        Check if connection is healthy
+
+        Connection is considered healthy if:
+        1. Connected to serial port
+        2. Recent messages received (within timeout period)
+
+        Returns:
+            True if connection healthy
+        """
+        if not self.connected:
+            return False
+
+        if self.last_message_time is None:
+            # No messages yet, but just connected - give it a chance
+            return True
+
+        # Check if we've received messages recently
+        time_since_last = (datetime.now() - self.last_message_time).total_seconds()
+
+        return time_since_last < self.connection_timeout
+
+    @staticmethod
+    def calculate_checksum(data: str) -> int:
+        """
+        Calculate XOR checksum for a message
+
+        This matches the Arduino implementation.
+
+        Args:
+            data: String to calculate checksum for
+
+        Returns:
+            8-bit XOR checksum value (0-255)
+
+        Educational Note:
+        XOR checksum is simple but effective for detecting
+        transmission errors. Each byte is XORed together.
+        """
+        checksum = 0
+        for char in data:
+            checksum ^= ord(char)
+        return checksum & 0xFF
+
+    @staticmethod
+    def validate_checksum(message: str) -> tuple[bool, str]:
+        """
+        Validate message checksum
+
+        Message format: DATA*XX
+        Where XX is 2-digit hex checksum
+
+        Args:
+            message: Complete message including checksum
+
+        Returns:
+            Tuple of (valid, data_without_checksum)
+
+        Educational Note:
+        The '*' delimiter separates data from checksum.
+        """
+        if '*' not in message:
+            # No checksum present
+            return True, message
+
+        # Split data and checksum
+        data, checksum_str = message.rsplit('*', 1)
+
+        try:
+            # Parse received checksum (hex)
+            received_checksum = int(checksum_str, 16)
+
+            # Calculate expected checksum
+            calculated_checksum = ArduinoInterface.calculate_checksum(data)
+
+            # Validate
+            is_valid = (received_checksum == calculated_checksum)
+
+            if not is_valid:
+                logger.warning(f"Checksum mismatch: expected {calculated_checksum:02X}, got {checksum_str}")
+
+            return is_valid, data
+
+        except ValueError:
+            logger.error(f"Invalid checksum format: {checksum_str}")
+            return False, data
+
+    @staticmethod
+    def append_checksum(message: str) -> str:
+        """
+        Append checksum to outgoing message
+
+        Args:
+            message: Message without checksum
+
+        Returns:
+            Message with *XX checksum appended
+
+        Educational Note:
+        This ensures message integrity during transmission.
+        """
+        checksum = ArduinoInterface.calculate_checksum(message)
+        return f"{message}*{checksum:02X}"
 
     @staticmethod
     def list_available_ports() -> List[str]:
