@@ -33,6 +33,7 @@ from datetime import datetime
 
 # Configure logging
 logger = logging.getLogger(__name__)
+comm_logger = logging.getLogger('communication')  # Dedicated communication logger
 
 
 class MessageType(Enum):
@@ -181,6 +182,7 @@ class ArduinoInterface:
 
             self.connected = True
             logger.info(f"Connected to Arduino on {self.port}")
+            comm_logger.info(f"[CONNECT   ] [--] [OK  ] Serial connection established on {self.port} @ {self.baud_rate} baud")
 
             # Start read thread
             self.running = True
@@ -191,6 +193,7 @@ class ArduinoInterface:
 
         except serial.SerialException as e:
             logger.error(f"Failed to connect: {e}")
+            comm_logger.error(f"[CONNECT   ] [--] [FAIL] Connection failed on {self.port}: {e}")
             self.connected = False
             return False
 
@@ -200,6 +203,11 @@ class ArduinoInterface:
             return
 
         logger.info("Disconnecting from Arduino")
+        comm_logger.info(f"[DISCONNECT] [--] [OK  ] Closing serial connection on {self.port}")
+
+        # Log final statistics
+        stats = self.get_statistics()
+        comm_logger.info(f"[STATS     ] [--] [INFO] Session summary: TX={stats['messages_sent']}, RX={stats['messages_received']}, Errors={stats['errors_count']}, Checksum Errors={stats['checksum_errors']}")
 
         # Stop read thread
         self.running = False
@@ -239,10 +247,15 @@ class ArduinoInterface:
                     self.messages_received += 1
                     self.last_message_time = datetime.now()
 
+                    # Log received message
+                    comm_logger.debug(f"[RECEIVE   ] [RX] [OK  ] {line[:100]}")
+
                     # Parse and route message
                     message = self._parse_message(line)
                     if message:
                         self._route_message(message)
+                    else:
+                        comm_logger.warning(f"[PARSE     ] [RX] [FAIL] Could not parse message: {line[:100]}")
 
             except serial.SerialException as e:
                 logger.error(f"Serial error: {e}")
@@ -275,6 +288,7 @@ class ArduinoInterface:
                 if not is_valid:
                     self.checksum_errors += 1
                     logger.error(f"Checksum validation failed for message: {line[:50]}...")
+                    comm_logger.error(f"[CHECKSUM  ] [RX] [FAIL] Invalid checksum on message: {line[:80]}")
                     return None
                 line = line_without_checksum
 
@@ -450,12 +464,14 @@ class ArduinoInterface:
                 self.connected = True
                 self.reconnect_success_count += 1
                 logger.info(f"Reconnection successful (attempt {attempt + 1})")
+                comm_logger.info(f"[RECONNECT ] [--] [OK  ] Reconnected to {self.port} after {attempt + 1} attempts")
 
                 # Reset delay on successful reconnection
                 return True
 
             except serial.SerialException as e:
                 logger.error(f"Reconnection attempt {attempt + 1} failed: {e}")
+                comm_logger.warning(f"[RECONNECT ] [--] [FAIL] Attempt {attempt + 1}/{self.reconnect_attempts} failed: {e}")
 
                 # Exponential backoff
                 logger.info(f"Waiting {current_delay:.1f}s before retry...")
@@ -506,12 +522,15 @@ class ArduinoInterface:
             self.serial.write(message.encode('utf-8'))
             self.messages_sent += 1
             logger.debug(f"Sent: {message.strip()}")
+            comm_logger.debug(f"[SEND      ] [TX] [OK  ] {message.strip()}")
 
         except serial.SerialException as e:
             logger.error(f"Error sending command: {e}")
+            comm_logger.error(f"[SEND      ] [TX] [FAIL] Failed to send '{message.strip()}': {e}")
             self.connected = False
         except Exception as e:
             logger.error(f"Unexpected error sending command: {e}")
+            comm_logger.error(f"[SEND      ] [TX] [FAIL] Unexpected error: {e}")
 
     def send_raw(self, message: str):
         """
