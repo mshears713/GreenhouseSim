@@ -7,9 +7,9 @@ services:
       dockerfile: Dockerfile
     container_name: greenhouse-control
 
-    # Port mapping - access UI at http://localhost:8501
+    # Port mapping - access UI at http://localhost:8502
     ports:
-      - "8501:8501"
+      - "8502:8501"
 
     # Volume mounts - persist data and logs
     volumes:
