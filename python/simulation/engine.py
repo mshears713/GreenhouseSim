@@ -64,9 +64,15 @@ class SimulationEngine:
         self.config = self._load_config(config_path)
 
         # Simulation parameters
-        self.time_step = self.config.get('temperature', {}).get('time_constant', 0.1)
+        sim_config = self.config.get('simulation', {})
+        self.time_step = sim_config.get('time_step', 0.1)  # Default 10 Hz
+        self.target_update_rate = sim_config.get('target_update_rate', 10.0)  # Hz
         self.running = False
         self.paused = False
+
+        # Performance optimization
+        self.adaptive_timing = sim_config.get('adaptive_timing', True)
+        self.max_time_step = sim_config.get('max_time_step', 0.2)  # Prevent huge jumps
 
         # Current environmental state
         self.environment = EnvironmentState(
@@ -117,6 +123,13 @@ class SimulationEngine:
         # Statistics
         self.updates_per_second = 0.0
         self.last_update_time = time.time()
+        self.actual_update_time = 0.0  # Actual time taken for updates
+        self.sleep_time_avg = 0.0  # Average sleep time
+        self.update_time_max = 0.0  # Max update time (for debugging slow updates)
+
+        # Performance monitoring with rolling average
+        self.update_times = []  # Last N update times
+        self.max_samples = 100  # Keep last 100 samples
 
         # Initialize detailed physics models
         self.temperature_model = TemperatureModel(self.config)
@@ -185,35 +198,69 @@ class SimulationEngine:
         Real-time simulation maintains wall-clock synchronization:
         - Update at fixed intervals (e.g., 10 Hz)
         - Keep simulation time aligned with real time
-        - Allows "slow-motion" or "fast-forward" by adjusting time scale
+        - Adaptive timing compensates for processing delays
+
+        Optimizations:
+        - Precise timing using perf_counter for sub-millisecond accuracy
+        - Adaptive time steps to maintain smooth update rate
+        - Rolling average for statistics to reduce overhead
         """
-        logger.info("Simulation loop started")
+        logger.info(f"Simulation loop started (target: {self.target_update_rate} Hz)")
+
+        # Use high-precision timer
+        last_loop_time = time.perf_counter()
+        stats_update_interval = 1.0  # Update stats every second
+        stats_timer = 0.0
 
         while self.running:
             if self.paused:
                 time.sleep(0.1)
+                last_loop_time = time.perf_counter()  # Reset timer after pause
                 continue
 
-            loop_start = time.time()
+            loop_start = time.perf_counter()
+
+            # Calculate actual time since last update (for adaptive timing)
+            actual_dt = loop_start - last_loop_time
+            last_loop_time = loop_start
+
+            # Use adaptive time step or fixed time step
+            if self.adaptive_timing:
+                # Clamp to prevent instability from huge jumps
+                dt = min(actual_dt, self.max_time_step)
+            else:
+                dt = self.time_step
 
             # Update simulation state
-            self._update_state(self.time_step)
+            update_start = time.perf_counter()
+            self._update_state(dt)
+            update_duration = time.perf_counter() - update_start
 
-            # Update statistics
+            # Track update performance
+            self.update_times.append(update_duration)
+            if len(self.update_times) > self.max_samples:
+                self.update_times.pop(0)
+
+            # Update statistics (less frequently to reduce overhead)
+            stats_timer += dt
+            if stats_timer >= stats_update_interval:
+                self._update_statistics()
+                stats_timer = 0.0
+
+            # Update simulation time
             self.iteration_count += 1
-            self.sim_time += self.time_step
+            self.sim_time += dt
 
-            # Calculate update rate
-            elapsed = time.time() - self.last_update_time
-            if elapsed > 1.0:
-                self.updates_per_second = self.iteration_count / elapsed
-                self.iteration_count = 0
-                self.last_update_time = time.time()
+            # Calculate sleep time to maintain target rate
+            loop_duration = time.perf_counter() - loop_start
+            target_loop_time = 1.0 / self.target_update_rate
+            sleep_time = target_loop_time - loop_duration
 
-            # Sleep to maintain real-time synchronization
-            loop_duration = time.time() - loop_start
-            sleep_time = max(0, self.time_step - loop_duration)
-            time.sleep(sleep_time)
+            # Only sleep if we have time budget
+            if sleep_time > 0.001:  # Sleep only if > 1ms
+                time.sleep(sleep_time)
+            elif sleep_time < -0.05:  # Warn if consistently behind
+                logger.warning(f"Simulation running slow: {-sleep_time*1000:.1f}ms behind")
 
         logger.info("Simulation loop stopped")
 
@@ -492,6 +539,24 @@ class SimulationEngine:
         """Get airflow model for detailed analysis"""
         return self.airflow_model
 
+    def _update_statistics(self):
+        """
+        Update performance statistics
+
+        Uses rolling averages for smooth metrics
+        """
+        if len(self.update_times) > 0:
+            self.actual_update_time = sum(self.update_times) / len(self.update_times)
+            self.update_time_max = max(self.update_times)
+
+        # Calculate actual update rate
+        if self.iteration_count > 0:
+            elapsed = time.perf_counter() - self.last_update_time
+            if elapsed > 0:
+                self.updates_per_second = self.iteration_count / elapsed
+                self.iteration_count = 0
+                self.last_update_time = time.perf_counter()
+
     def get_statistics(self) -> Dict[str, Any]:
         """Get simulation statistics"""
         return {
@@ -501,7 +566,11 @@ class SimulationEngine:
             'updates_per_second': self.updates_per_second,
             'temperature': self.environment.temperature,
             'moisture': self.environment.moisture,
-            'humidity': self.environment.humidity
+            'humidity': self.environment.humidity,
+            'avg_update_time_ms': self.actual_update_time * 1000,
+            'max_update_time_ms': self.update_time_max * 1000,
+            'target_rate_hz': self.target_update_rate,
+            'performance_ratio': (self.updates_per_second / self.target_update_rate * 100) if self.target_update_rate > 0 else 100
         }
 
     def reset(self):

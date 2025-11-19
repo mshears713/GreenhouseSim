@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  greenhouse:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: greenhouse-control
+
+    # Port mapping - access UI at http://localhost:8501
+    ports:
+      - "8501:8501"
+
+    # Volume mounts - persist data and logs
+    volumes:
+      - ./data:/app/data
+      - ./simulation_config.yaml:/app/simulation_config.yaml
+      - ./config.ini:/app/config.ini
+      # Mount logs directory
+      - greenhouse-logs:/app/data/logs
+
+    # Environment variables
+    environment:
+      - PYTHONUNBUFFERED=1
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+
+    # For Arduino USB access (Linux/WSL)
+    # Uncomment and modify for your Arduino port
+    # devices:
+    #   - /dev/ttyACM0:/dev/ttyACM0
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
+
+    # Privileged mode for USB access (alternative method)
+    # WARNING: Only use for development! Not recommended for production
+    # privileged: true
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Resource limits (optional)
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    # Healthcheck
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Network
+    networks:
+      - greenhouse-net
+
+# Named volumes for persistent data
+volumes:
+  greenhouse-logs:
+    driver: local
+
+# Network configuration
+networks:
+  greenhouse-net:
+    driver: bridge

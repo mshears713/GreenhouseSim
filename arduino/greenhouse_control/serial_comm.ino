@@ -21,6 +21,9 @@
 // SERIAL PROTOCOL CONSTANTS
 // ============================================================================
 
+// Enable/disable checksum validation (set false to disable for debugging)
+const bool USE_CHECKSUMS = true;
+
 // Message prefixes
 const char* MSG_SENSOR = "SENSOR";
 const char* MSG_ACTUATOR = "ACTUATOR";
@@ -49,6 +52,8 @@ const int ERR_SENSOR_FAIL = 3;
 const int ERR_ACTUATOR_FAIL = 4;
 const int ERR_SAFETY_LIMIT = 5;
 const int ERR_COMM_TIMEOUT = 6;
+const int ERR_CHECKSUM_FAIL = 7;
+const int ERR_MALFORMED_MSG = 8;
 
 // Serial buffer
 const int SERIAL_BUFFER_SIZE = 128;
@@ -61,6 +66,11 @@ unsigned long messageCounter = 0;
 // Last message receive time (for timeout detection)
 unsigned long lastMessageReceived = 0;
 const unsigned long MESSAGE_TIMEOUT = 5000;  // 5 seconds
+
+// Error statistics
+unsigned long totalMessagesReceived = 0;
+unsigned long checksumErrors = 0;
+unsigned long malformedMessages = 0;
 
 // ============================================================================
 // SERIAL INPUT HANDLING
@@ -117,12 +127,30 @@ void handleSerialInput() {
  * Process a complete serial message
  *
  * Parses message and routes to appropriate handler based on prefix
+ *
+ * Educational Note:
+ * With checksums enabled, messages have format:
+ * MESSAGE_DATA*CHECKSUM
+ * Where CHECKSUM is a 2-digit hex value (00-FF)
  */
 void processSerialMessage(char* message) {
+  totalMessagesReceived++;
+
+  // Validate checksum if enabled
+  if (USE_CHECKSUMS) {
+    if (!validateChecksum(message)) {
+      checksumErrors++;
+      sendError(ERR_CHECKSUM_FAIL, String("Checksum failed (") +
+                checksumErrors + String("/") + totalMessagesReceived + String(")"));
+      return;
+    }
+  }
+
   // Parse message prefix
   char* prefix = strtok(message, ":");
 
   if (prefix == NULL) {
+    malformedMessages++;
     sendError(ERR_INVALID_CMD, "Missing message prefix");
     return;
   }
@@ -285,6 +313,7 @@ void handleCommand() {
     printSystemStatus();
     printSensorReadings();
     printActuatorStatus();
+    printCommStats();
   }
 
   // RESET: Software reset (re-initialize system)
@@ -481,4 +510,164 @@ void sendHeartbeat() {
     sendInfo("Heartbeat");
     lastHeartbeat = millis();
   }
+}
+
+// ============================================================================
+// CHECKSUM FUNCTIONS
+// ============================================================================
+
+/**
+ * Calculate XOR checksum for a message
+ *
+ * XOR checksum is simple but effective for detecting single-bit errors
+ * and many multi-bit errors. Not cryptographically secure, but sufficient
+ * for detecting transmission errors over serial.
+ *
+ * Educational Note:
+ * More robust options include CRC (Cyclic Redundancy Check), but XOR
+ * is lightweight and easy to implement on resource-constrained systems.
+ *
+ * Parameters:
+ *   data: String to calculate checksum for
+ *
+ * Returns:
+ *   8-bit XOR checksum value (0-255)
+ */
+uint8_t calculateChecksum(const char* data) {
+  uint8_t checksum = 0;
+
+  for (int i = 0; data[i] != '\0'; i++) {
+    checksum ^= (uint8_t)data[i];
+  }
+
+  return checksum;
+}
+
+/**
+ * Validate message checksum
+ *
+ * Message format: DATA*XX
+ * Where XX is 2-digit hex checksum
+ *
+ * Parameters:
+ *   message: Complete message including checksum
+ *
+ * Returns:
+ *   true if checksum is valid or checksums disabled
+ *   false if checksum is invalid
+ *
+ * Educational Note:
+ * The '*' delimiter separates data from checksum, making it easy
+ * to split the message for validation.
+ */
+bool validateChecksum(char* message) {
+  // Find checksum delimiter
+  char* checksumPtr = strchr(message, '*');
+
+  if (checksumPtr == NULL) {
+    // No checksum present
+    if (USE_CHECKSUMS) {
+      return false;  // Expected checksum but none found
+    } else {
+      return true;  // Checksums not required
+    }
+  }
+
+  // Split message from checksum
+  *checksumPtr = '\0';  // Null-terminate message data
+  checksumPtr++;  // Move to checksum string
+
+  // Parse received checksum (hex format)
+  uint8_t receivedChecksum = (uint8_t)strtol(checksumPtr, NULL, 16);
+
+  // Calculate expected checksum
+  uint8_t calculatedChecksum = calculateChecksum(message);
+
+  // Validate
+  bool isValid = (receivedChecksum == calculatedChecksum);
+
+  if (!isValid) {
+    // Log checksum mismatch for debugging
+    Serial.print(F("DEBUG: Checksum mismatch - Expected: 0x"));
+    Serial.print(calculatedChecksum, HEX);
+    Serial.print(F(", Received: 0x"));
+    Serial.println(receivedChecksum, HEX);
+  }
+
+  return isValid;
+}
+
+/**
+ * Append checksum to outgoing message
+ *
+ * Modifies the message string to append *XX checksum
+ *
+ * Parameters:
+ *   message: Message buffer (must have space for *XX\0)
+ *
+ * Educational Note:
+ * This function modifies the message in-place, adding the
+ * checksum before transmission.
+ */
+void appendChecksum(char* message) {
+  if (!USE_CHECKSUMS) {
+    return;  // Checksums disabled
+  }
+
+  uint8_t checksum = calculateChecksum(message);
+
+  // Append delimiter and checksum
+  strcat(message, "*");
+
+  // Convert checksum to 2-digit hex string
+  char checksumStr[3];
+  sprintf(checksumStr, "%02X", checksum);
+  strcat(message, checksumStr);
+}
+
+/**
+ * Send message with checksum
+ *
+ * Helper function to send any message with automatic checksum
+ *
+ * Parameters:
+ *   message: Message to send (without checksum)
+ *
+ * Educational Note:
+ * This wraps the checksum logic, making it easy to add checksums
+ * to any outgoing message.
+ */
+void sendMessageWithChecksum(const char* message) {
+  // Need mutable buffer for checksum appending
+  char buffer[SERIAL_BUFFER_SIZE];
+  strncpy(buffer, message, SERIAL_BUFFER_SIZE - 4);  // Leave space for *XX\0
+  buffer[SERIAL_BUFFER_SIZE - 4] = '\0';
+
+  appendChecksum(buffer);
+
+  Serial.println(buffer);
+}
+
+/**
+ * Get communication statistics
+ *
+ * Returns error rates and message counts for diagnostics
+ */
+void printCommStats() {
+  Serial.print(F("STATS:"));
+  Serial.print(totalMessagesReceived);
+  Serial.print(F(","));
+  Serial.print(checksumErrors);
+  Serial.print(F(","));
+  Serial.print(malformedMessages);
+  Serial.print(F(","));
+
+  if (totalMessagesReceived > 0) {
+    float errorRate = (float)(checksumErrors + malformedMessages) / totalMessagesReceived * 100.0;
+    Serial.print(errorRate, 2);
+  } else {
+    Serial.print(F("0.00"));
+  }
+
+  Serial.println(F("%"));
 }
